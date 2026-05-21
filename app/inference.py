@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 import math
+import os
 import re
 import threading
 from typing import Callable
@@ -17,6 +18,7 @@ from torch import nn
 
 
 ProgressCallback = Callable[[float, str], None]
+SUPPORTED_DEVICE_PREFERENCES = {"auto", "cuda", "cpu"}
 
 
 @dataclass(frozen=True)
@@ -275,6 +277,59 @@ def format_model_label(value: str) -> str:
     return re.sub(r"[_-]+", " ", value).strip() or value
 
 
+def is_running_in_colab() -> bool:
+    try:
+        import google.colab  # type: ignore[import-not-found]
+    except ImportError:
+        return False
+    return True
+
+
+def resolve_device(preference: str | None = None) -> tuple[torch.device, str]:
+    default_preference = "cuda" if is_running_in_colab() else "auto"
+    requested_preference = (preference or os.environ.get("UPSCALE_DEVICE") or default_preference).strip().lower()
+
+    if requested_preference not in SUPPORTED_DEVICE_PREFERENCES:
+        supported_values = ", ".join(sorted(SUPPORTED_DEVICE_PREFERENCES))
+        raise ValueError(
+            f"Unsupported UPSCALE_DEVICE value '{requested_preference}'. "
+            f"Expected one of: {supported_values}."
+        )
+
+    if requested_preference == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA was requested, but PyTorch could not access a CUDA device. "
+                "Enable a GPU runtime in Colab or set UPSCALE_DEVICE=cpu."
+            )
+        device = torch.device("cuda")
+    elif requested_preference == "cpu":
+        device = torch.device("cpu")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    device_label = "GPU (CUDA)" if device.type == "cuda" else "CPU"
+    return device, device_label
+
+
+def build_output_name(
+    input_filename: str,
+    model_info: ModelInfo,
+    upscale_factor: float,
+    prefix: str | None = None,
+) -> str:
+    factor_label = f"{upscale_factor:g}x".replace(".", "p")
+    source_stem = sanitize_stem(Path(input_filename).stem)
+    name = (
+        f"{source_stem}-"
+        f"{sanitize_stem(model_info.path.stem)}-"
+        f"{factor_label}.png"
+    )
+    if prefix:
+        return f"{prefix}-{name}"
+    return name
+
+
 class ESRGANUpscaler:
     def __init__(self, model_info: ModelInfo, device: torch.device) -> None:
         self.model_info = model_info
@@ -429,14 +484,19 @@ class ESRGANUpscaler:
 
 
 class UpscaleService:
-    def __init__(self, model_dir: Path, output_dir: Path, upload_dir: Path) -> None:
+    def __init__(
+        self,
+        model_dir: Path,
+        output_dir: Path,
+        upload_dir: Path,
+        device_preference: str | None = None,
+    ) -> None:
         self.model_dir = model_dir
         self.output_dir = output_dir
         self.upload_dir = upload_dir
         self.output_dir.mkdir(exist_ok=True)
         self.upload_dir.mkdir(exist_ok=True)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.device_label = "GPU (CUDA)" if self.device.type == "cuda" else "CPU"
+        self.device, self.device_label = resolve_device(device_preference)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="upscale")
         self.jobs: dict[str, UpscaleJob] = {}
         self.job_lock = threading.Lock()
@@ -554,6 +614,59 @@ class UpscaleService:
             "items": queued_items,
         }
 
+    def upscale_image_file(
+        self,
+        input_path: Path,
+        model_key: str,
+        upscale_factor: float,
+        tile_size: int,
+        output_path: Path | None = None,
+        progress_callback: ProgressCallback | None = None,
+    ) -> Path:
+        model_info = self._get_model_info(model_key)
+        resolved_output_path = output_path or self.output_dir / build_output_name(
+            input_path.name,
+            model_info,
+            upscale_factor,
+        )
+        if not resolved_output_path.suffix:
+            resolved_output_path = resolved_output_path.with_suffix(".png")
+        resolved_output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            if progress_callback is not None:
+                progress_callback(0.04, "Opening image")
+
+            with Image.open(input_path) as uploaded_image:
+                source_image = ImageOps.exif_transpose(uploaded_image).copy()
+
+            if progress_callback is not None:
+                progress_callback(0.10, "Inspecting image")
+                progress_callback(0.16, f"Loading {model_info.label}")
+
+            model_runner = self._get_or_load_model(model_info)
+
+            def on_progress(progress_fraction: float, message: str) -> None:
+                if progress_callback is None:
+                    return
+                mapped_progress = 16 + round(progress_fraction * 78)
+                progress_callback(min(mapped_progress / 100, 0.94), message)
+
+            result_image = model_runner.upscale(source_image, upscale_factor, tile_size, on_progress)
+
+            if progress_callback is not None:
+                progress_callback(0.96, "Saving output image")
+
+            result_image.save(resolved_output_path)
+
+            if progress_callback is not None:
+                progress_callback(1.0, "Upscale finished")
+
+            return resolved_output_path
+        finally:
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+
     def _queue_job(
         self,
         image_bytes: bytes,
@@ -638,13 +751,11 @@ class UpscaleService:
 
             result_image = model_runner.upscale(source_image, upscale_factor, tile_size, on_progress)
 
-            factor_label = f"{upscale_factor:g}x".replace(".", "p")
-            source_stem = sanitize_stem(Path(input_filename).stem)
-            output_name = (
-                f"{job_id[:8]}-"
-                f"{source_stem}-"
-                f"{sanitize_stem(model_info.path.stem)}-"
-                f"{factor_label}.png"
+            output_name = build_output_name(
+                input_filename,
+                model_info,
+                upscale_factor,
+                prefix=job_id[:8],
             )
             output_path = self.output_dir / output_name
             self._update_job(job_id, progress=96, message="Saving output image")
