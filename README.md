@@ -112,6 +112,24 @@ python launch_upscale.py serve --foreground --host 0.0.0.0 --device cuda
 
 The server binds to `0.0.0.0` in Colab. You still need a Colab notebook proxy or tunnel if you want to open that browser UI from outside the runtime.
 
+If you want a temporary public GUI link without manually installing `cloudflared` or running `cloudflared service install {token}` yourself, use the built-in quick tunnel flag instead:
+
+```bash
+python launch_upscale.py serve --foreground --host 0.0.0.0 --device cuda --cloudflared
+```
+
+That command will:
+
+- start the FastAPI GUI
+- download `cloudflared` automatically if it is not already available
+- create a temporary `https://...trycloudflare.com` URL and print it in the terminal
+
+Notes for `--cloudflared`:
+
+- it uses a temporary TryCloudflare quick tunnel for development, not a persistent production tunnel
+- no separate `cloudflared` install or service token step is required
+- the public tunnel URL is printed to the terminal once Cloudflare has finished provisioning it
+
 ## Notes
 
 - The included models are native `4x` ESRGAN weights. If you choose another factor in the UI, the app performs the ESRGAN pass first and then resizes to the exact requested factor.
