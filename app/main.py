@@ -41,6 +41,25 @@ def list_models() -> dict[str, list[dict[str, int | str]] | str]:
     }
 
 
+async def read_uploaded_image(image: UploadFile) -> bytes:
+    if not image.filename:
+        raise HTTPException(status_code=400, detail="Please select an input image.")
+    if not (image.content_type or "").startswith("image/"):
+        raise HTTPException(status_code=400, detail=f"Only image uploads are supported: {image.filename}")
+
+    image_bytes = await image.read()
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail=f"The selected image is empty: {image.filename}")
+    return image_bytes
+
+
+def validate_upscale_inputs(upscale_factor: float, tile_size: int) -> None:
+    if upscale_factor < 1 or upscale_factor > 8:
+        raise HTTPException(status_code=400, detail="Upscale factor must be between 1x and 8x.")
+    if tile_size < 0 or tile_size > 2048:
+        raise HTTPException(status_code=400, detail="Tile size must be between 0 and 2048.")
+
+
 @app.post("/api/upscale", status_code=202)
 async def upscale_image(
     image: UploadFile = File(...),
@@ -48,18 +67,8 @@ async def upscale_image(
     upscale_factor: float = Form(...),
     tile_size: int = Form(0),
 ) -> dict[str, str]:
-    if not image.filename:
-        raise HTTPException(status_code=400, detail="Please select an input image.")
-    if not (image.content_type or "").startswith("image/"):
-        raise HTTPException(status_code=400, detail="Only image uploads are supported.")
-    if upscale_factor < 1 or upscale_factor > 8:
-        raise HTTPException(status_code=400, detail="Upscale factor must be between 1x and 8x.")
-    if tile_size < 0 or tile_size > 2048:
-        raise HTTPException(status_code=400, detail="Tile size must be between 0 and 2048.")
-
-    image_bytes = await image.read()
-    if not image_bytes:
-        raise HTTPException(status_code=400, detail="The selected image is empty.")
+    validate_upscale_inputs(upscale_factor, tile_size)
+    image_bytes = await read_uploaded_image(image)
 
     try:
         job_id = service.submit_job(
@@ -75,9 +84,47 @@ async def upscale_image(
     return {"job_id": job_id}
 
 
+@app.post("/api/upscale/batch", status_code=202)
+async def upscale_batch(
+    images: list[UploadFile] = File(...),
+    model: str = Form(...),
+    upscale_factor: float = Form(...),
+    tile_size: int = Form(0),
+) -> dict[str, object]:
+    validate_upscale_inputs(upscale_factor, tile_size)
+
+    if not images:
+        raise HTTPException(status_code=400, detail="Please select at least one image.")
+
+    payloads: list[tuple[bytes, str]] = []
+    for image in images:
+        image_bytes = await read_uploaded_image(image)
+        if image.filename is None:
+            raise HTTPException(status_code=400, detail="One of the selected images has no filename.")
+        payloads.append((image_bytes, image.filename))
+
+    try:
+        return service.submit_batch(
+            images=payloads,
+            model_key=model,
+            upscale_factor=upscale_factor,
+            tile_size=tile_size,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: str) -> dict[str, int | float | str | None]:
     try:
         return service.get_job(job_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Job not found.") from exc
+
+
+@app.get("/api/batches/{batch_id}")
+def get_batch(batch_id: str) -> dict[str, object]:
+    try:
+        return service.get_batch(batch_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Batch not found.") from exc

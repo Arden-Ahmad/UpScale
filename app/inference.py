@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from io import BytesIO
+import os
 from pathlib import Path
 import math
 import re
@@ -43,6 +44,8 @@ class UpscaleJob:
     input_filename: str
     model_key: str
     upscale_factor: float
+    batch_id: str | None = None
+    item_index: int | None = None
     original_width: int | None = None
     original_height: int | None = None
     result_width: int | None = None
@@ -59,12 +62,74 @@ class UpscaleJob:
             "input_filename": self.input_filename,
             "model_key": self.model_key,
             "upscale_factor": self.upscale_factor,
+            "batch_id": self.batch_id,
+            "item_index": self.item_index,
             "original_width": self.original_width,
             "original_height": self.original_height,
             "result_width": self.result_width,
             "result_height": self.result_height,
             "output_url": self.output_url,
             "error": self.error,
+        }
+
+
+@dataclass(frozen=True)
+class BatchJob:
+    id: str
+    model_key: str
+    upscale_factor: float
+    tile_size: int
+    job_ids: list[str]
+
+    def to_dict(self, items: list[UpscaleJob]) -> dict[str, object]:
+        total_items = len(items)
+        completed_count = sum(1 for item in items if item.status == "completed")
+        failed_count = sum(1 for item in items if item.status == "failed")
+        running_items = [item for item in items if item.status == "running"]
+        queued_count = sum(1 for item in items if item.status == "queued")
+        progress = round(sum(item.progress for item in items) / total_items) if total_items else 0
+
+        if running_items:
+            running_item = min(
+                running_items,
+                key=lambda item: item.item_index if item.item_index is not None else total_items,
+            )
+            active_position = (running_item.item_index or 0) + 1
+            status = "running"
+            message = f"Processing {active_position} of {total_items}: {running_item.input_filename}"
+        elif queued_count == total_items:
+            status = "queued"
+            message = f"Queued {total_items} image{'s' if total_items != 1 else ''}"
+        elif completed_count == total_items:
+            status = "completed"
+            message = f"Finished {completed_count} image{'s' if completed_count != 1 else ''}"
+        elif completed_count + failed_count == total_items:
+            status = "completed_with_errors"
+            message = (
+                f"Finished {completed_count} image{'s' if completed_count != 1 else ''}; "
+                f"{failed_count} failed"
+            )
+            progress = 100
+        else:
+            status = "running"
+            message = (
+                f"Queued {queued_count} image{'s' if queued_count != 1 else ''}; "
+                f"{completed_count} done"
+            )
+
+        return {
+            "id": self.id,
+            "status": status,
+            "progress": progress,
+            "message": message,
+            "model_key": self.model_key,
+            "upscale_factor": self.upscale_factor,
+            "tile_size": self.tile_size,
+            "total_items": total_items,
+            "completed_count": completed_count,
+            "failed_count": failed_count,
+            "queued_count": queued_count,
+            "items": [item.to_dict() for item in items],
         }
 
 
@@ -209,6 +274,46 @@ def sanitize_stem(value: str) -> str:
 
 def format_model_label(value: str) -> str:
     return re.sub(r"[_-]+", " ", value).strip() or value
+
+
+def resolve_device_label(device: torch.device) -> str:
+    if device.type != "cuda":
+        return "CPU"
+
+    try:
+        return f"GPU (CUDA: {torch.cuda.get_device_name(0)})"
+    except Exception:
+        return "GPU (CUDA)"
+
+
+def resolve_torch_device(device_preference: str | None = None) -> tuple[torch.device, str]:
+    preference = (device_preference or os.getenv("UPSCALE_DEVICE") or "auto").strip().lower()
+    valid_preferences = {"auto", "cuda", "cpu"}
+    if preference not in valid_preferences:
+        raise ValueError("UPSCALE_DEVICE must be one of: auto, cuda, cpu.")
+
+    cuda_available = torch.cuda.is_available()
+    if preference == "cpu":
+        device = torch.device("cpu")
+        return device, resolve_device_label(device)
+
+    if preference == "cuda" and not cuda_available:
+        if torch.version.cuda is None:
+            raise RuntimeError(
+                "CUDA was requested, but the installed PyTorch build has no CUDA support. "
+                "Install a CUDA-enabled torch build or switch UPSCALE_DEVICE back to auto."
+            )
+        raise RuntimeError(
+            "CUDA was requested, but no CUDA device is available. "
+            "In Colab, enable a GPU runtime before starting UpScale."
+        )
+
+    if cuda_available:
+        device = torch.device("cuda")
+        return device, resolve_device_label(device)
+
+    device = torch.device("cpu")
+    return device, resolve_device_label(device)
 
 
 class ESRGANUpscaler:
@@ -371,11 +476,12 @@ class UpscaleService:
         self.upload_dir = upload_dir
         self.output_dir.mkdir(exist_ok=True)
         self.upload_dir.mkdir(exist_ok=True)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.device_label = "GPU (CUDA)" if self.device.type == "cuda" else "CPU"
+        self.device, self.device_label = resolve_torch_device()
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="upscale")
         self.jobs: dict[str, UpscaleJob] = {}
         self.job_lock = threading.Lock()
+        self.batches: dict[str, BatchJob] = {}
+        self.batch_lock = threading.Lock()
         self.model_cache: dict[str, ESRGANUpscaler] = {}
         self.model_lock = threading.Lock()
 
@@ -399,6 +505,17 @@ class UpscaleService:
                 raise KeyError(job_id)
             return job.to_dict()
 
+    def get_batch(self, batch_id: str) -> dict[str, object]:
+        with self.batch_lock:
+            batch = self.batches.get(batch_id)
+            if batch is None:
+                raise KeyError(batch_id)
+
+        with self.job_lock:
+            items = [self.jobs[job_id] for job_id in batch.job_ids if job_id in self.jobs]
+
+        return batch.to_dict(items)
+
     def submit_job(
         self,
         image_bytes: bytes,
@@ -408,6 +525,84 @@ class UpscaleService:
         tile_size: int,
     ) -> str:
         model_info = self._get_model_info(model_key)
+        job_id, input_path = self._queue_job(
+            image_bytes=image_bytes,
+            filename=filename,
+            model_info=model_info,
+            upscale_factor=upscale_factor,
+        )
+
+        self.executor.submit(
+            self._process_job,
+            job_id,
+            input_path,
+            filename,
+            model_info,
+            upscale_factor,
+            tile_size,
+        )
+        return job_id
+
+    def submit_batch(
+        self,
+        images: list[tuple[bytes, str]],
+        model_key: str,
+        upscale_factor: float,
+        tile_size: int,
+    ) -> dict[str, object]:
+        if not images:
+            raise ValueError("Please select at least one image.")
+
+        model_info = self._get_model_info(model_key)
+        batch_id = uuid4().hex
+        queued_items: list[dict[str, str]] = []
+        job_ids: list[str] = []
+
+        for item_index, (image_bytes, filename) in enumerate(images):
+            job_id, input_path = self._queue_job(
+                image_bytes=image_bytes,
+                filename=filename,
+                model_info=model_info,
+                upscale_factor=upscale_factor,
+                batch_id=batch_id,
+                item_index=item_index,
+            )
+            job_ids.append(job_id)
+            queued_items.append({"job_id": job_id, "input_filename": filename})
+            self.executor.submit(
+                self._process_job,
+                job_id,
+                input_path,
+                filename,
+                model_info,
+                upscale_factor,
+                tile_size,
+            )
+
+        batch = BatchJob(
+            id=batch_id,
+            model_key=model_info.key,
+            upscale_factor=upscale_factor,
+            tile_size=tile_size,
+            job_ids=job_ids,
+        )
+        with self.batch_lock:
+            self.batches[batch_id] = batch
+
+        return {
+            "batch_id": batch_id,
+            "items": queued_items,
+        }
+
+    def _queue_job(
+        self,
+        image_bytes: bytes,
+        filename: str,
+        model_info: ModelInfo,
+        upscale_factor: float,
+        batch_id: str | None = None,
+        item_index: int | None = None,
+    ) -> tuple[str, Path]:
         job_id = uuid4().hex
         input_stem = sanitize_stem(Path(filename).stem)
         input_name = f"{job_id[:8]}-{input_stem}{Path(filename).suffix or '.png'}"
@@ -422,12 +617,13 @@ class UpscaleService:
             input_filename=filename,
             model_key=model_info.key,
             upscale_factor=upscale_factor,
+            batch_id=batch_id,
+            item_index=item_index,
         )
         with self.job_lock:
             self.jobs[job_id] = job
 
-        self.executor.submit(self._process_job, job_id, input_path, model_info, upscale_factor, tile_size)
-        return job_id
+        return job_id, input_path
 
     def _get_model_info(self, model_key: str) -> ModelInfo:
         for model in self.list_models():
@@ -455,6 +651,7 @@ class UpscaleService:
         self,
         job_id: str,
         input_path: Path,
+        input_filename: str,
         model_info: ModelInfo,
         upscale_factor: float,
         tile_size: int,
@@ -482,7 +679,7 @@ class UpscaleService:
             result_image = model_runner.upscale(source_image, upscale_factor, tile_size, on_progress)
 
             factor_label = f"{upscale_factor:g}x".replace(".", "p")
-            source_stem = sanitize_stem(Path(self.get_job(job_id)["input_filename"] or "image").stem)
+            source_stem = sanitize_stem(Path(input_filename).stem)
             output_name = (
                 f"{job_id[:8]}-"
                 f"{source_stem}-"

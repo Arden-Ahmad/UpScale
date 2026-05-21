@@ -41,23 +41,26 @@
       <main class="workspace">
         <section class="panel control-panel">
           <form id="upscaleForm" class="control-stack">
-            <div class="section-heading">
+            <div class="section-heading control-header">
               <div>
                 <p class="section-kicker">Session</p>
                 <h2>Upscale Controls</h2>
               </div>
-              <button id="refreshModelsButton" class="ghost-button" type="button">Refresh Models</button>
+              <div class="button-cluster">
+                <button id="refreshModelsButton" class="ghost-button" type="button">Refresh Models</button>
+                <button id="clearQueueButton" class="ghost-button" type="button">Clear Queue</button>
+              </div>
             </div>
 
-            <label id="dropZone" class="drop-zone" for="imageInput">
-              <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" hidden />
-              <span class="drop-zone-badge">Input image</span>
-              <strong>Drop an image here</strong>
-              <span>or browse your files</span>
+            <label id="dropZone" class="drop-zone control-block control-drop-zone" for="imageInput">
+              <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" multiple hidden />
+              <span class="drop-zone-badge">Batch input</span>
+              <strong>Drop one image or a full batch</strong>
+              <span>drag several files here or browse your folders</span>
               <small id="inputFileLabel">PNG, JPG, WEBP, BMP</small>
             </label>
 
-            <div class="field">
+            <div class="field control-block control-model-field">
               <label class="field-label" for="modelSelect">
                 <span>Model</span>
                 <span id="nativeScaleHint">Native scale pending</span>
@@ -65,7 +68,7 @@
               <select id="modelSelect" class="select"></select>
             </div>
 
-            <div class="field range-wrap">
+            <div class="field range-wrap control-block control-factor-field">
               <label class="field-label" for="factorInput">
                 <span>Upscale factor</span>
                 <span id="factorValue">4x</span>
@@ -77,7 +80,7 @@
               </p>
             </div>
 
-            <details class="advanced-panel">
+            <details class="advanced-panel control-block control-advanced-panel">
               <summary>Advanced options</summary>
               <div class="field">
                 <label class="field-label" for="tileSelect">
@@ -92,11 +95,22 @@
                   <option value="768">768 px</option>
                 </select>
               </div>
+              <div class="field checkbox-field">
+                <label class="toggle-row" for="allowSub100Zoom">
+                  <span>Advanced compare mode</span>
+                  <input id="allowSub100Zoom" type="checkbox" />
+                </label>
+                <p class="field-note">Allow zooming the compare view below the default 100% fit level.</p>
+              </div>
             </details>
 
-            <div class="resolution-grid">
+            <div class="resolution-grid control-block control-resolution-grid">
               <article class="metric-card">
-                <span class="metric-label">Original</span>
+                <span class="metric-label">Queue</span>
+                <strong id="selectedCountValue" class="metric-value">No images selected</strong>
+              </article>
+              <article class="metric-card">
+                <span class="metric-label">Focused original</span>
                 <strong id="originalResolution" class="metric-value">Waiting for image</strong>
               </article>
               <article class="metric-card accent-card">
@@ -109,24 +123,41 @@
               </article>
             </div>
 
-            <section class="progress-card">
+            <section class="progress-card control-block control-progress-card">
               <div class="progress-meta">
                 <div>
                   <p class="section-kicker">Progress</p>
                   <h3 id="progressMessage">Waiting for a job</h3>
                 </div>
-                <strong id="progressPercent">0%</strong>
+                <div class="progress-stats">
+                  <strong id="progressPercent">0%</strong>
+                  <span id="batchStats">No active batch</span>
+                </div>
               </div>
               <div class="progress-track" aria-hidden="true">
                 <div id="progressFill" class="progress-fill"></div>
               </div>
             </section>
 
-            <div id="statusBanner" class="status-banner" data-kind="idle">
-              Choose an image, then select a model to begin.
+            <section class="queue-card control-block control-queue-card">
+              <div class="queue-heading">
+                <div>
+                  <p class="section-kicker">Batch</p>
+                  <h3>Image Queue</h3>
+                </div>
+                <span id="queueSummary" class="queue-summary">No files selected</span>
+              </div>
+              <div id="queueEmptyState" class="queue-empty">
+                Add multiple images to process them one after another in a single run.
+              </div>
+              <div id="queueList" class="queue-list" hidden></div>
+            </section>
+
+            <div id="statusBanner" class="status-banner control-block control-status-banner" data-kind="idle">
+              Choose one or more images, then select a model to begin.
             </div>
 
-            <button id="startButton" class="primary-button" type="submit">Start Upscaling</button>
+            <button id="startButton" class="primary-button control-block control-start-button" type="submit">Start Upscaling</button>
           </form>
         </section>
 
@@ -136,21 +167,21 @@
               <p class="section-kicker">Preview</p>
               <h2>Compare Before and After</h2>
             </div>
-            <a id="downloadButton" class="download-button is-disabled" aria-disabled="true">Download result</a>
+            <a id="downloadButton" class="download-button is-disabled" aria-disabled="true">Download selected</a>
           </div>
 
           <div class="preview-grid">
             <article class="preview-card">
               <div class="preview-meta">
                 <div>
-                  <h3>Original image</h3>
+                  <h3>Focused original</h3>
                   <p id="originalMeta">No image selected yet</p>
                 </div>
               </div>
               <div class="image-stage">
                 <img id="originalPreview" alt="Original preview" hidden />
                 <div id="originalPlaceholder" class="placeholder">
-                  Your source image preview appears here as soon as you drop a file into the input zone.
+                  The selected queue item appears here. Pick any image from the batch list to inspect it.
                 </div>
               </div>
             </article>
@@ -158,19 +189,63 @@
             <article class="preview-card accent-preview">
               <div class="preview-meta">
                 <div>
-                  <h3>Upscaled output</h3>
-                  <p id="resultMeta">Run a job to generate a result preview</p>
+                  <h3>Focused output</h3>
+                  <p id="resultMeta">Run a batch to generate a result preview</p>
                 </div>
                 <span id="resultResolution" class="result-chip">Waiting to render</span>
               </div>
               <div class="image-stage">
                 <img id="resultPreview" alt="Upscaled output preview" hidden />
                 <div id="resultPlaceholder" class="placeholder">
-                  When the ESRGAN pass finishes, the rendered output and download link appear here.
+                  When the selected item finishes its ESRGAN pass, the rendered output and download link appear here.
                 </div>
               </div>
             </article>
           </div>
+
+          <section class="compare-card">
+            <div class="compare-heading">
+              <div>
+                <p class="section-kicker">Inspect</p>
+                <h3>Before / After Split View</h3>
+              </div>
+
+              <div class="compare-toolbar">
+                <span class="compare-toolbar-note">Drag the divider inside the image to compare.</span>
+
+                <div class="zoom-controls">
+                  <button id="zoomOutButton" class="icon-button" type="button" aria-label="Zoom out">-</button>
+                  <span id="zoomLabel" class="zoom-label">100%</span>
+                  <button id="zoomInButton" class="icon-button" type="button" aria-label="Zoom in">+</button>
+                  <button id="resetViewButton" class="ghost-button compact-button" type="button">Reset View</button>
+                </div>
+              </div>
+            </div>
+
+            <div id="compareStage" class="compare-stage">
+              <div id="comparePlaceholder" class="placeholder compare-placeholder">
+                Select a processed item to inspect details. Drag the divider inside the image to compare, then zoom and pan for closer inspection.
+              </div>
+
+              <div id="compareViewport" class="compare-viewport" hidden>
+                <div id="compareCanvasPan" class="compare-canvas-pan">
+                  <div id="compareCanvas" class="compare-canvas">
+                    <img id="compareBeforeImage" alt="Before image comparison" />
+                    <div id="compareAfterMask" class="compare-after-mask">
+                      <img id="compareAfterImage" alt="After image comparison" />
+                    </div>
+                    <input id="compareDivider" class="compare-divider" type="range" min="0" max="100" value="50" aria-label="Compare divider" />
+                    <span class="compare-badge before-badge">Before</span>
+                    <span class="compare-badge after-badge">After</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <p id="compareHint" class="field-note compare-note">
+              Scroll to zoom. Drag the divider to compare. Drag to pan only after zooming in enough to crop the image.
+            </p>
+          </section>
         </section>
       </main>
     </div>
