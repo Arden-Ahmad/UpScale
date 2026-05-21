@@ -37,8 +37,6 @@ const elements = {
   nativeScaleValue: document.getElementById("nativeScaleValue"),
   factorInput: document.getElementById("factorInput"),
   factorValue: document.getElementById("factorValue"),
-  denoiseInput: document.getElementById("denoiseInput"),
-  denoiseValue: document.getElementById("denoiseValue"),
   tileSelect: document.getElementById("tileSelect"),
   allowSub100Zoom: document.getElementById("allowSub100Zoom"),
   selectedCountValue: document.getElementById("selectedCountValue"),
@@ -87,10 +85,6 @@ function pluralize(count, singular, plural = `${singular}s`) {
 
 function formatFactor(value) {
   return `${Number(value).toLocaleString(undefined, { maximumFractionDigits: 1 })}x`;
-}
-
-function formatStrength(value) {
-  return Number(value).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
 }
 
 function formatPixels(width, height) {
@@ -167,7 +161,6 @@ function getCounts() {
 function updateModelHints() {
   const factor = Number(elements.factorInput.value);
   elements.factorValue.textContent = formatFactor(factor);
-  elements.denoiseValue.textContent = formatStrength(elements.denoiseInput.value);
 
   const selectedModel = getSelectedModel();
   if (selectedModel) {
@@ -242,7 +235,6 @@ function updateBusyState() {
   const hasItems = state.items.length > 0;
   elements.modelSelect.disabled = state.busy || !state.models.length;
   elements.factorInput.disabled = state.busy;
-  elements.denoiseInput.disabled = state.busy;
   elements.tileSelect.disabled = state.busy;
   elements.imageInput.disabled = state.busy;
   elements.refreshModelsButton.disabled = state.busy;
@@ -863,7 +855,6 @@ async function startUpscale(event) {
   }
   formData.append("model", elements.modelSelect.value);
   formData.append("upscale_factor", elements.factorInput.value);
-  formData.append("denoise_strength", elements.denoiseInput.value);
   formData.append("tile_size", elements.tileSelect.value);
 
   try {
@@ -1002,7 +993,6 @@ elements.factorInput.addEventListener("input", () => {
     updateCompareTransform();
   }
 });
-elements.denoiseInput.addEventListener("input", updateModelHints);
 elements.modelSelect.addEventListener("change", updateEstimate);
 elements.allowSub100Zoom.addEventListener("change", () => {
   if (!elements.allowSub100Zoom.checked && state.compare.zoom < 1) {

@@ -48,7 +48,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", "-i", help="Input image path")
     parser.add_argument("--model", "-m", help="Model key or 1-based model index")
     parser.add_argument("--factor", "-f", type=float, help="Upscale factor between 1 and 8")
-    parser.add_argument("--denoise", type=float, help="Diffusion denoise strength between 0 and 1")
     parser.add_argument("--output", "-o", help="Output image path")
     parser.add_argument(
         "--tile-size",
@@ -169,40 +168,17 @@ def validate_tile_size(value: int) -> int:
     return value
 
 
-def validate_denoise_strength(value: float) -> float:
-    if value < 0 or value > 1:
-        raise ValueError("Denoise strength must be between 0 and 1.")
-    return value
-
-
-def resolve_denoise_strength(provided_value: float | None) -> float:
-    if provided_value is not None:
-        return validate_denoise_strength(provided_value)
-
-    if not sys.stdin.isatty():
-        return 0.0
-
-    while True:
-        raw_value = prompt_with_default("Denoise strength", "0")
-        try:
-            return validate_denoise_strength(float(raw_value))
-        except ValueError as exc:
-            print(exc, file=sys.stderr)
-
-
 def resolve_output_path(
     service: UpscaleService,
     input_path: Path,
     model_info: ModelInfo,
     upscale_factor: float,
-    denoise_strength: float,
     provided_value: str | None,
 ) -> Path:
     default_output_path = service.output_dir / build_output_name(
         input_path.name,
         model_info,
         upscale_factor,
-        denoise_strength=denoise_strength,
     )
 
     if provided_value is not None:
@@ -241,22 +217,13 @@ def run_cli(args: argparse.Namespace) -> int:
     input_path = resolve_input_path(args.input)
     model_info = resolve_model_choice(models, args.model)
     upscale_factor = resolve_upscale_factor(args.factor)
-    denoise_strength = resolve_denoise_strength(args.denoise)
     tile_size = validate_tile_size(args.tile_size)
-    output_path = resolve_output_path(
-        service,
-        input_path,
-        model_info,
-        upscale_factor,
-        denoise_strength,
-        args.output,
-    )
+    output_path = resolve_output_path(service, input_path, model_info, upscale_factor, args.output)
 
     print(f"Device: {describe_device(service)}")
     print(f"Input image: {input_path}")
     print(f"Model: {model_info.label} ({model_info.key})")
     print(f"Upscale factor: {upscale_factor:g}x")
-    print(f"Denoise strength: {denoise_strength:g}")
     print(f"Output image: {output_path}")
 
     progress_bar = TerminalProgressBar()
@@ -265,7 +232,6 @@ def run_cli(args: argparse.Namespace) -> int:
             input_path=input_path,
             model_key=model_info.key,
             upscale_factor=upscale_factor,
-            denoise_strength=denoise_strength,
             tile_size=tile_size,
             output_path=output_path,
             progress_callback=progress_bar.update,

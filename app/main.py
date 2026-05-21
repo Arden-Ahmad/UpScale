@@ -53,13 +53,11 @@ async def read_uploaded_image(image: UploadFile) -> bytes:
     return image_bytes
 
 
-def validate_upscale_inputs(upscale_factor: float, tile_size: int, denoise_strength: float) -> None:
+def validate_upscale_inputs(upscale_factor: float, tile_size: int) -> None:
     if upscale_factor < 1 or upscale_factor > 8:
         raise HTTPException(status_code=400, detail="Upscale factor must be between 1x and 8x.")
     if tile_size < 0 or tile_size > 2048:
         raise HTTPException(status_code=400, detail="Tile size must be between 0 and 2048.")
-    if denoise_strength < 0 or denoise_strength > 1:
-        raise HTTPException(status_code=400, detail="Denoise strength must be between 0 and 1.")
 
 
 @app.post("/api/upscale", status_code=202)
@@ -68,9 +66,8 @@ async def upscale_image(
     model: str = Form(...),
     upscale_factor: float = Form(...),
     tile_size: int = Form(0),
-    denoise_strength: float = Form(0),
 ) -> dict[str, str]:
-    validate_upscale_inputs(upscale_factor, tile_size, denoise_strength)
+    validate_upscale_inputs(upscale_factor, tile_size)
     image_bytes = await read_uploaded_image(image)
 
     try:
@@ -79,7 +76,6 @@ async def upscale_image(
             filename=image.filename,
             model_key=model,
             upscale_factor=upscale_factor,
-            denoise_strength=denoise_strength,
             tile_size=tile_size,
         )
     except ValueError as exc:
@@ -94,9 +90,8 @@ async def upscale_batch(
     model: str = Form(...),
     upscale_factor: float = Form(...),
     tile_size: int = Form(0),
-    denoise_strength: float = Form(0),
 ) -> dict[str, object]:
-    validate_upscale_inputs(upscale_factor, tile_size, denoise_strength)
+    validate_upscale_inputs(upscale_factor, tile_size)
 
     if not images:
         raise HTTPException(status_code=400, detail="Please select at least one image.")
@@ -113,7 +108,6 @@ async def upscale_batch(
             images=payloads,
             model_key=model,
             upscale_factor=upscale_factor,
-            denoise_strength=denoise_strength,
             tile_size=tile_size,
         )
     except ValueError as exc:
