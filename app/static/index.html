@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>UpScale</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Space+Grotesk:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <div class="ambient ambient-a"></div>
+      <div class="ambient ambient-b"></div>
+
+      <header class="masthead">
+        <div>
+          <p class="eyebrow">Local ESRGAN Studio</p>
+          <h1>Turn soft images into crisp, oversized renders.</h1>
+          <p class="lead">
+            Use the ESRGAN weights in your model folder, preview the before and after side by side,
+            and export polished upscales straight from the browser.
+          </p>
+        </div>
+
+        <div class="masthead-meta">
+          <div class="status-pill">
+            <span class="status-dot"></span>
+            <span id="deviceBadge">Checking device...</span>
+          </div>
+          <div class="status-pill">
+            <span id="modelCount">0 models detected</span>
+          </div>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="panel control-panel">
+          <form id="upscaleForm" class="control-stack">
+            <div class="section-heading">
+              <div>
+                <p class="section-kicker">Session</p>
+                <h2>Upscale Controls</h2>
+              </div>
+              <button id="refreshModelsButton" class="ghost-button" type="button">Refresh Models</button>
+            </div>
+
+            <label id="dropZone" class="drop-zone" for="imageInput">
+              <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" hidden />
+              <span class="drop-zone-badge">Input image</span>
+              <strong>Drop an image here</strong>
+              <span>or browse your files</span>
+              <small id="inputFileLabel">PNG, JPG, WEBP, BMP</small>
+            </label>
+
+            <div class="field">
+              <label class="field-label" for="modelSelect">
+                <span>Model</span>
+                <span id="nativeScaleHint">Native scale pending</span>
+              </label>
+              <select id="modelSelect" class="select"></select>
+            </div>
+
+            <div class="field range-wrap">
+              <label class="field-label" for="factorInput">
+                <span>Upscale factor</span>
+                <span id="factorValue">4x</span>
+              </label>
+              <input id="factorInput" type="range" min="1" max="8" step="0.5" value="4" />
+              <p class="field-note">
+                Best detail usually lands closest to the model's native scale. Other values are resized
+                from the ESRGAN output.
+              </p>
+            </div>
+
+            <details class="advanced-panel">
+              <summary>Advanced options</summary>
+              <div class="field">
+                <label class="field-label" for="tileSelect">
+                  <span>Tile size</span>
+                  <span>Helps with memory limits</span>
+                </label>
+                <select id="tileSelect" class="select">
+                  <option value="0">Automatic</option>
+                  <option value="256">256 px</option>
+                  <option value="384">384 px</option>
+                  <option value="512">512 px</option>
+                  <option value="768">768 px</option>
+                </select>
+              </div>
+            </details>
+
+            <div class="resolution-grid">
+              <article class="metric-card">
+                <span class="metric-label">Original</span>
+                <strong id="originalResolution" class="metric-value">Waiting for image</strong>
+              </article>
+              <article class="metric-card accent-card">
+                <span class="metric-label">Estimated output</span>
+                <strong id="targetResolution" class="metric-value">Waiting for image</strong>
+              </article>
+              <article class="metric-card">
+                <span class="metric-label">Model native scale</span>
+                <strong id="nativeScaleValue" class="metric-value">Waiting for model</strong>
+              </article>
+            </div>
+
+            <section class="progress-card">
+              <div class="progress-meta">
+                <div>
+                  <p class="section-kicker">Progress</p>
+                  <h3 id="progressMessage">Waiting for a job</h3>
+                </div>
+                <strong id="progressPercent">0%</strong>
+              </div>
+              <div class="progress-track" aria-hidden="true">
+                <div id="progressFill" class="progress-fill"></div>
+              </div>
+            </section>
+
+            <div id="statusBanner" class="status-banner" data-kind="idle">
+              Choose an image, then select a model to begin.
+            </div>
+
+            <button id="startButton" class="primary-button" type="submit">Start Upscaling</button>
+          </form>
+        </section>
+
+        <section class="panel preview-panel">
+          <div class="preview-heading">
+            <div>
+              <p class="section-kicker">Preview</p>
+              <h2>Compare Before and After</h2>
+            </div>
+            <a id="downloadButton" class="download-button is-disabled" aria-disabled="true">Download result</a>
+          </div>
+
+          <div class="preview-grid">
+            <article class="preview-card">
+              <div class="preview-meta">
+                <div>
+                  <h3>Original image</h3>
+                  <p id="originalMeta">No image selected yet</p>
+                </div>
+              </div>
+              <div class="image-stage">
+                <img id="originalPreview" alt="Original preview" hidden />
+                <div id="originalPlaceholder" class="placeholder">
+                  Your source image preview appears here as soon as you drop a file into the input zone.
+                </div>
+              </div>
+            </article>
+
+            <article class="preview-card accent-preview">
+              <div class="preview-meta">
+                <div>
+                  <h3>Upscaled output</h3>
+                  <p id="resultMeta">Run a job to generate a result preview</p>
+                </div>
+                <span id="resultResolution" class="result-chip">Waiting to render</span>
+              </div>
+              <div class="image-stage">
+                <img id="resultPreview" alt="Upscaled output preview" hidden />
+                <div id="resultPlaceholder" class="placeholder">
+                  When the ESRGAN pass finishes, the rendered output and download link appear here.
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
