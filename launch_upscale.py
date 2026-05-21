@@ -194,6 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
     cli_parser.add_argument("--input", "-i", help="Input image path")
     cli_parser.add_argument("--model", "-m", help="Model key or 1-based model index")
     cli_parser.add_argument("--factor", "-f", type=float, help="Upscale factor between 1 and 8")
+    cli_parser.add_argument("--denoise", type=float, help="Diffusion denoise strength between 0 and 1")
     cli_parser.add_argument("--output", "-o", help="Output image path")
     cli_parser.add_argument(
         "--tile-size",
@@ -233,6 +234,8 @@ def run_cli_command(args: argparse.Namespace, python_executable: Path) -> int:
         command.extend(["--model", args.model])
     if args.factor is not None:
         command.extend(["--factor", f"{args.factor:g}"])
+    if args.denoise is not None:
+        command.extend(["--denoise", f"{args.denoise:g}"])
     if args.output:
         command.extend(["--output", args.output])
     if args.tile_size:

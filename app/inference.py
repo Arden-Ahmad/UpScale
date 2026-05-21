@@ -16,6 +16,8 @@ from PIL import Image, ImageOps
 import torch
 from torch import nn
 
+from app.diffusion import DiffusionRefiner, load_diffusion_settings_from_env
+
 
 ProgressCallback = Callable[[float, str], None]
 SUPPORTED_DEVICE_PREFERENCES = {"auto", "cuda", "cpu"}
@@ -45,6 +47,7 @@ class UpscaleJob:
     input_filename: str
     model_key: str
     upscale_factor: float
+    denoise_strength: float
     batch_id: str | None = None
     item_index: int | None = None
     original_width: int | None = None
@@ -63,6 +66,7 @@ class UpscaleJob:
             "input_filename": self.input_filename,
             "model_key": self.model_key,
             "upscale_factor": self.upscale_factor,
+            "denoise_strength": self.denoise_strength,
             "batch_id": self.batch_id,
             "item_index": self.item_index,
             "original_width": self.original_width,
@@ -79,6 +83,7 @@ class BatchJob:
     id: str
     model_key: str
     upscale_factor: float
+    denoise_strength: float
     tile_size: int
     job_ids: list[str]
 
@@ -125,6 +130,7 @@ class BatchJob:
             "message": message,
             "model_key": self.model_key,
             "upscale_factor": self.upscale_factor,
+            "denoise_strength": self.denoise_strength,
             "tile_size": self.tile_size,
             "total_items": total_items,
             "completed_count": completed_count,
@@ -277,6 +283,10 @@ def format_model_label(value: str) -> str:
     return re.sub(r"[_-]+", " ", value).strip() or value
 
 
+def format_numeric_token(value: float, max_decimals: int = 2) -> str:
+    return format(value, f".{max_decimals}f").rstrip("0").rstrip(".").replace(".", "p")
+
+
 def is_running_in_colab() -> bool:
     try:
         import google.colab  # type: ignore[import-not-found]
@@ -317,14 +327,14 @@ def build_output_name(
     model_info: ModelInfo,
     upscale_factor: float,
     prefix: str | None = None,
+    denoise_strength: float = 0.0,
 ) -> str:
-    factor_label = f"{upscale_factor:g}x".replace(".", "p")
+    factor_label = f"{format_numeric_token(upscale_factor)}x"
     source_stem = sanitize_stem(Path(input_filename).stem)
-    name = (
-        f"{source_stem}-"
-        f"{sanitize_stem(model_info.path.stem)}-"
-        f"{factor_label}.png"
-    )
+    name_parts = [source_stem, sanitize_stem(model_info.path.stem), factor_label]
+    if denoise_strength > 0:
+        name_parts.append(f"denoise-{format_numeric_token(denoise_strength)}")
+    name = "-".join(name_parts) + ".png"
     if prefix:
         return f"{prefix}-{name}"
     return name
@@ -504,6 +514,9 @@ class UpscaleService:
         self.batch_lock = threading.Lock()
         self.model_cache: dict[str, ESRGANUpscaler] = {}
         self.model_lock = threading.Lock()
+        self.diffusion_settings = load_diffusion_settings_from_env()
+        self.diffusion_refiner: DiffusionRefiner | None = None
+        self.diffusion_lock = threading.Lock()
 
     def list_models(self) -> list[ModelInfo]:
         models: list[ModelInfo] = []
@@ -542,6 +555,7 @@ class UpscaleService:
         filename: str,
         model_key: str,
         upscale_factor: float,
+        denoise_strength: float,
         tile_size: int,
     ) -> str:
         model_info = self._get_model_info(model_key)
@@ -550,6 +564,7 @@ class UpscaleService:
             filename=filename,
             model_info=model_info,
             upscale_factor=upscale_factor,
+            denoise_strength=denoise_strength,
         )
 
         self.executor.submit(
@@ -559,6 +574,7 @@ class UpscaleService:
             filename,
             model_info,
             upscale_factor,
+            denoise_strength,
             tile_size,
         )
         return job_id
@@ -568,6 +584,7 @@ class UpscaleService:
         images: list[tuple[bytes, str]],
         model_key: str,
         upscale_factor: float,
+        denoise_strength: float,
         tile_size: int,
     ) -> dict[str, object]:
         if not images:
@@ -584,6 +601,7 @@ class UpscaleService:
                 filename=filename,
                 model_info=model_info,
                 upscale_factor=upscale_factor,
+                denoise_strength=denoise_strength,
                 batch_id=batch_id,
                 item_index=item_index,
             )
@@ -596,6 +614,7 @@ class UpscaleService:
                 filename,
                 model_info,
                 upscale_factor,
+                denoise_strength,
                 tile_size,
             )
 
@@ -603,6 +622,7 @@ class UpscaleService:
             id=batch_id,
             model_key=model_info.key,
             upscale_factor=upscale_factor,
+            denoise_strength=denoise_strength,
             tile_size=tile_size,
             job_ids=job_ids,
         )
@@ -620,6 +640,7 @@ class UpscaleService:
         model_key: str,
         upscale_factor: float,
         tile_size: int,
+        denoise_strength: float = 0.0,
         output_path: Path | None = None,
         progress_callback: ProgressCallback | None = None,
     ) -> Path:
@@ -628,6 +649,7 @@ class UpscaleService:
             input_path.name,
             model_info,
             upscale_factor,
+            denoise_strength=denoise_strength,
         )
         if not resolved_output_path.suffix:
             resolved_output_path = resolved_output_path.with_suffix(".png")
@@ -642,17 +664,15 @@ class UpscaleService:
 
             if progress_callback is not None:
                 progress_callback(0.10, "Inspecting image")
-                progress_callback(0.16, f"Loading {model_info.label}")
 
-            model_runner = self._get_or_load_model(model_info)
-
-            def on_progress(progress_fraction: float, message: str) -> None:
-                if progress_callback is None:
-                    return
-                mapped_progress = 16 + round(progress_fraction * 78)
-                progress_callback(min(mapped_progress / 100, 0.94), message)
-
-            result_image = model_runner.upscale(source_image, upscale_factor, tile_size, on_progress)
+            result_image = self._render_image(
+                source_image=source_image,
+                model_info=model_info,
+                upscale_factor=upscale_factor,
+                denoise_strength=denoise_strength,
+                tile_size=tile_size,
+                progress_callback=progress_callback,
+            )
 
             if progress_callback is not None:
                 progress_callback(0.96, "Saving output image")
@@ -673,6 +693,7 @@ class UpscaleService:
         filename: str,
         model_info: ModelInfo,
         upscale_factor: float,
+        denoise_strength: float,
         batch_id: str | None = None,
         item_index: int | None = None,
     ) -> tuple[str, Path]:
@@ -690,6 +711,7 @@ class UpscaleService:
             input_filename=filename,
             model_key=model_info.key,
             upscale_factor=upscale_factor,
+            denoise_strength=denoise_strength,
             batch_id=batch_id,
             item_index=item_index,
         )
@@ -714,6 +736,53 @@ class UpscaleService:
             self.model_cache[model_info.key] = model_runner
             return model_runner
 
+    def _get_or_load_diffusion_refiner(self) -> DiffusionRefiner:
+        with self.diffusion_lock:
+            if self.diffusion_refiner is not None:
+                return self.diffusion_refiner
+
+            refiner = DiffusionRefiner(self.diffusion_settings, self.device)
+            self.diffusion_refiner = refiner
+            return refiner
+
+    def _render_image(
+        self,
+        source_image: Image.Image,
+        model_info: ModelInfo,
+        upscale_factor: float,
+        denoise_strength: float,
+        tile_size: int,
+        progress_callback: ProgressCallback | None,
+    ) -> Image.Image:
+        if progress_callback is not None:
+            progress_callback(0.16, f"Loading {model_info.label}")
+
+        model_runner = self._get_or_load_model(model_info)
+        upscale_end = 0.94 if denoise_strength <= 0 else 0.72
+
+        def on_upscale_progress(progress_fraction: float, message: str) -> None:
+            if progress_callback is None:
+                return
+            mapped_progress = 0.16 + progress_fraction * (upscale_end - 0.16)
+            progress_callback(min(mapped_progress, upscale_end), message)
+
+        result_image = model_runner.upscale(source_image, upscale_factor, tile_size, on_upscale_progress)
+        if denoise_strength <= 0:
+            return result_image
+
+        if progress_callback is not None:
+            progress_callback(0.74, "Loading diffusion refiner")
+
+        refiner = self._get_or_load_diffusion_refiner()
+
+        def on_diffusion_progress(progress_fraction: float, message: str) -> None:
+            if progress_callback is None:
+                return
+            mapped_progress = 0.74 + progress_fraction * 0.20
+            progress_callback(min(mapped_progress, 0.94), message)
+
+        return refiner.refine(result_image, denoise_strength, on_diffusion_progress)
+
     def _update_job(self, job_id: str, **changes: object) -> None:
         with self.job_lock:
             job = self.jobs[job_id]
@@ -727,6 +796,7 @@ class UpscaleService:
         input_filename: str,
         model_info: ModelInfo,
         upscale_factor: float,
+        denoise_strength: float,
         tile_size: int,
     ) -> None:
         try:
@@ -742,20 +812,24 @@ class UpscaleService:
                 original_height=source_image.height,
             )
 
-            self._update_job(job_id, progress=16, message=f"Loading {model_info.label}")
-            model_runner = self._get_or_load_model(model_info)
-
             def on_progress(progress_fraction: float, message: str) -> None:
-                mapped_progress = 16 + round(progress_fraction * 78)
-                self._update_job(job_id, progress=min(mapped_progress, 94), message=message)
+                self._update_job(job_id, progress=min(round(progress_fraction * 100), 94), message=message)
 
-            result_image = model_runner.upscale(source_image, upscale_factor, tile_size, on_progress)
+            result_image = self._render_image(
+                source_image=source_image,
+                model_info=model_info,
+                upscale_factor=upscale_factor,
+                denoise_strength=denoise_strength,
+                tile_size=tile_size,
+                progress_callback=on_progress,
+            )
 
             output_name = build_output_name(
                 input_filename,
                 model_info,
                 upscale_factor,
                 prefix=job_id[:8],
+                denoise_strength=denoise_strength,
             )
             output_path = self.output_dir / output_name
             self._update_job(job_id, progress=96, message="Saving output image")
