@@ -3,7 +3,6 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from io import BytesIO
-import os
 from pathlib import Path
 import math
 import re
@@ -276,46 +275,6 @@ def format_model_label(value: str) -> str:
     return re.sub(r"[_-]+", " ", value).strip() or value
 
 
-def resolve_device_label(device: torch.device) -> str:
-    if device.type != "cuda":
-        return "CPU"
-
-    try:
-        return f"GPU (CUDA: {torch.cuda.get_device_name(0)})"
-    except Exception:
-        return "GPU (CUDA)"
-
-
-def resolve_torch_device(device_preference: str | None = None) -> tuple[torch.device, str]:
-    preference = (device_preference or os.getenv("UPSCALE_DEVICE") or "auto").strip().lower()
-    valid_preferences = {"auto", "cuda", "cpu"}
-    if preference not in valid_preferences:
-        raise ValueError("UPSCALE_DEVICE must be one of: auto, cuda, cpu.")
-
-    cuda_available = torch.cuda.is_available()
-    if preference == "cpu":
-        device = torch.device("cpu")
-        return device, resolve_device_label(device)
-
-    if preference == "cuda" and not cuda_available:
-        if torch.version.cuda is None:
-            raise RuntimeError(
-                "CUDA was requested, but the installed PyTorch build has no CUDA support. "
-                "Install a CUDA-enabled torch build or switch UPSCALE_DEVICE back to auto."
-            )
-        raise RuntimeError(
-            "CUDA was requested, but no CUDA device is available. "
-            "In Colab, enable a GPU runtime before starting UpScale."
-        )
-
-    if cuda_available:
-        device = torch.device("cuda")
-        return device, resolve_device_label(device)
-
-    device = torch.device("cpu")
-    return device, resolve_device_label(device)
-
-
 class ESRGANUpscaler:
     def __init__(self, model_info: ModelInfo, device: torch.device) -> None:
         self.model_info = model_info
@@ -476,7 +435,8 @@ class UpscaleService:
         self.upload_dir = upload_dir
         self.output_dir.mkdir(exist_ok=True)
         self.upload_dir.mkdir(exist_ok=True)
-        self.device, self.device_label = resolve_torch_device()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device_label = "GPU (CUDA)" if self.device.type == "cuda" else "CPU"
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="upscale")
         self.jobs: dict[str, UpscaleJob] = {}
         self.job_lock = threading.Lock()
